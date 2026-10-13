@@ -1,0 +1,6 @@
+flask>=3.0,<4
+ollama>=0.6,<0.7
+faster-whisper>=1.1,<2
+piper-tts>=1.8,<2
+python-dotenv>=1.0,<2
+pytest>=8.0,<9

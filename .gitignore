@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Secrets / local config
+.env
+
+# Model weights (never commit)
+models/
+*.onnx
+*.onnx.json
+*.bin
+*.pt
+*.gguf
+!tests/fixtures/**
+
+# Recordings and generated audio
+var/
+*.wav
+!tests/fixtures/*.wav
+*.webm
+*.mp3
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

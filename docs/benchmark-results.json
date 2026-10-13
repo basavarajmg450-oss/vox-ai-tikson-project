@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-10-13T04:50:58.606924+00:00",
+  "model": "qwen3:4b",
+  "whisper_model": "base",
+  "device": "cpu",
+  "compute_type": "int8",
+  "turns": 3,
+  "stages": {
+    "health_check_ms": 2104.0,
+    "tts_load_ms": 5561.7,
+    "tts_ms": [
+      172.8,
+      182.6,
+      173.9
+    ],
+    "stt_load_ms": 4124.2,
+    "stt_ms": [
+      1519.4,
+      1433.3,
+      1563.3
+    ],
+    "llm_first_ms": 31540.2,
+    "llm_ms": [
+      38670.3,
+      55790.3,
+      35332.3
+    ],
+    "llm_reported_ms": 35330.9,
+    "voice_wall_ms": [
+      34946.0,
+      31832.2,
+      31273.3
+    ],
+    "voice_detail": [
+      {
+        "wall_ms": 34946.0,
+        "stt_ms": 1772.7,
+        "llm_ms": 32732.9,
+        "tts_ms": 404.2,
+        "backend_total_ms": 34940.2
+      },
+      {
+        "wall_ms": 31832.2,
+        "stt_ms": 1804.3,
+        "llm_ms": 29705.2,
+        "tts_ms": 305.5,
+        "backend_total_ms": 31829.9
+      },
+      {
+        "wall_ms": 31273.3,
+        "stt_ms": 2161.8,
+        "llm_ms": 28777.0,
+        "tts_ms": 316.0,
+        "backend_total_ms": 31271.1
+      }
+    ]
+  }
+}

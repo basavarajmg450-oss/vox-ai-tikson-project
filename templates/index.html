@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>VoxAI — local voice assistant</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236ea8fe'%3E%3Cpath d='M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+        <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z"/>
+      </svg>
+      <span class="brand-name">VoxAI</span>
+      <span class="brand-tag" title="Speech recognition, the language model and the voice all run on this machine">100% local</span>
+    </div>
+    <div class="topbar-right">
+      <span id="health-chip" class="chip" title="Backend status">checking…</span>
+      <span id="status-pill" class="pill pill-ready" role="status" aria-live="polite" aria-atomic="true">Ready</span>
+      <button id="settings-toggle" class="icon-btn" type="button" aria-expanded="false" aria-controls="settings-panel" title="Settings">Settings</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="chat-panel" aria-label="Conversation">
+      <div id="chat-log" class="chat-log" aria-live="polite" aria-relevant="additions text">
+        <div id="empty-state" class="empty-state">
+          <h2>Talk to VoxAI</h2>
+          <p>Press the microphone (or <strong>Start</strong>) and ask a question.</p>
+          <p>Everything runs on this machine: Faster-Whisper hears you, Qwen3 answers, Piper speaks.</p>
+          <p class="hint">Follow-ups work too — try “What's the capital of France?” and then “And how many people live there?”</p>
+        </div>
+      </div>
+
+      <div id="error-banner" class="error-banner" hidden>
+        <span id="error-text"></span>
+        <button id="error-dismiss" class="icon-btn" type="button" aria-label="Dismiss error">✕</button>
+      </div>
+
+      <div id="latency-panel" class="latency-panel" hidden>
+        <h3>Latency <span class="tag">measured</span></h3>
+        <div id="latency-grid" class="latency-grid"></div>
+        <p id="latency-note" class="latency-note"></p>
+      </div>
+
+      <div class="composer">
+        <button id="mic-btn" class="mic-btn" type="button" aria-label="Start recording" title="Start recording">
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+            <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z"/>
+          </svg>
+        </button>
+        <button id="start-btn" class="btn" type="button">Start</button>
+        <button id="stop-btn" class="btn" type="button" disabled>Stop</button>
+        <span id="record-timer" class="timer" aria-hidden="true">0.0s</span>
+        <span class="composer-spacer"></span>
+        <button id="new-btn" class="btn ghost" type="button" title="Start a fresh conversation">New conversation</button>
+        <button id="clear-btn" class="btn ghost" type="button" title="Erase this conversation on the server">Clear history</button>
+      </div>
+
+      <form id="text-form" class="text-form" autocomplete="off">
+        <label class="sr-only" for="text-input">Type a message</label>
+        <input id="text-input" type="text" maxlength="2000" placeholder="…or type a message and press Enter">
+        <button id="send-btn" class="btn" type="submit">Send</button>
+      </form>
+    </section>
+
+    <aside id="settings-panel" class="settings" hidden aria-label="Settings">
+      <h3>Settings</h3>
+
+      <fieldset class="settings-group">
+        <legend>Generation</legend>
+        <label class="setting-row">
+          <span>Temperature <output id="temperature-out">0.6</output></span>
+          <input id="temperature" type="range" min="0" max="1.5" step="0.1" value="0.6">
+        </label>
+        <label class="setting-row">
+          <span>Max answer length <output id="max-tokens-out">200</output> tokens</span>
+          <input id="max-tokens" type="range" min="40" max="400" step="20" value="200">
+        </label>
+        <label class="setting-row checkbox">
+          <input id="autoplay" type="checkbox" checked>
+          <span>Read answers aloud automatically</span>
+        </label>
+      </fieldset>
+
+      <fieldset class="settings-group">
+        <legend>Backend</legend>
+        <dl id="backend-info" class="backend-info">
+          <dt>LLM</dt><dd id="info-llm">…</dd>
+          <dt>Speech recognition</dt><dd id="info-whisper">…</dd>
+          <dt>Voice</dt><dd id="info-piper">…</dd>
+          <dt>Session</dt><dd id="info-session">…</dd>
+        </dl>
+      </fieldset>
+
+      <p class="settings-note">Values above come live from <a href="/api/health">/api/health</a>. Server-side limits (model, history turns) are set in <code>.env</code> on the backend.</p>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    VoxAI v{{ version }} · all inference runs locally · <a href="/api/health">/api/health</a>
+  </footer>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
