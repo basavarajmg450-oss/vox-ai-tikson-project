@@ -18,6 +18,7 @@ from services.llm_service import LLMService
 from services.session_store import SessionStore
 from services.speech_to_text import SpeechToTextService
 from services.text_to_speech import TTSService
+from services.web_search import build_search_context, needs_web_search
 
 #: Callback used to emit honest progress events (``stage``: stt/llm/tts/done).
 ProgressFn = Callable[[Dict[str, Any]], None]
@@ -39,12 +40,14 @@ class VoicePipeline:
         stt: SpeechToTextService,
         llm: LLMService,
         tts: TTSService,
+        web_search: Optional[Any] = None,
     ) -> None:
         self.config = config
         self.sessions = sessions
         self.stt = stt
         self.llm = llm
         self.tts = tts
+        self.web_search = web_search
 
     # ------------------------------------------------------------------ input validation
     def validate_message(self, message: Any) -> str:
@@ -127,34 +130,78 @@ class VoicePipeline:
         history = self.sessions.history(session.session_id)
         messages = list(history) + [{"role": "user", "content": text}]
 
+        # Optional web search for current information
+        search_result = None
+        sources = []
+        system_prompt = self.config.system_prompt
+        if (
+            self.web_search is not None
+            and getattr(self.config, "web_search_enabled", True)
+            and needs_web_search(text)
+        ):
+            search_result = self.web_search.search(
+                text, max_results=self.config.web_search_max_results
+            )
+            if search_result.get("ok"):
+                snippets = search_result.get("snippets", [])
+                if snippets:
+                    sources = search_result.get("sources", [])
+                    search_context = build_search_context(snippets, sources)
+                    system_prompt = self.config.system_prompt + "\n\n" + search_context
+                else:
+                    system_prompt = (
+                        self.config.system_prompt
+                        + "\n\nNote: A web search was attempted for this query but returned no results. "
+                        + "Clearly state that you could not find current information on this topic."
+                    )
+            else:
+                system_prompt = (
+                    self.config.system_prompt
+                    + "\n\nCRITICAL: A web search was attempted for this query because it may require current information, but the web search failed. "
+                    + "You MUST clearly tell the user that current web information could not be retrieved right now. "
+                    + "Do NOT claim to have searched the web or know real-time facts."
+                )
+
         answer, timing = self.llm.generate(
             messages,
-            system_prompt=self.config.system_prompt,
+            system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
         )
+
+        if search_result is not None and not search_result.get("ok"):
+            disclaimer = "Current web information could not be retrieved right now. "
+            if "could not be retrieved" not in answer.lower() and "unable to retrieve" not in answer.lower():
+                answer = disclaimer + answer
 
         # Only commit the turn once the model answered successfully.
         turns = self.sessions.append(session.session_id, "user", text)
         turns = self.sessions.append(session.session_id, "assistant", answer)
 
         backend_total_ms = (time.perf_counter() - started) * 1000.0
+        latency_dict = {
+            "recording_ms": None,
+            "llm_ms": timing["llm_ms"],
+            "backend_total_ms": round(backend_total_ms, 1),
+            "sources": {
+                "llm_ms": "measured_server",
+                "backend_total_ms": "measured_server",
+            },
+            "mode": PIPELINE_MODE,
+            "note": PIPELINE_NOTE,
+        }
+        if search_result is not None and "search_ms" in search_result:
+            latency_dict["search_ms"] = search_result["search_ms"]
+            latency_dict["sources"]["search_ms"] = "measured_server"
+
         return {
             "session_id": session.session_id,
             "response": answer,
             "history_turns": turns,
             "language": None,
-            "latency": {
-                "recording_ms": None,
-                "llm_ms": timing["llm_ms"],
-                "backend_total_ms": round(backend_total_ms, 1),
-                "sources": {
-                    "llm_ms": "measured_server",
-                    "backend_total_ms": "measured_server",
-                },
-                "mode": PIPELINE_MODE,
-                "note": PIPELINE_NOTE,
-            },
+            "web_search": bool(search_result and search_result.get("ok") and search_result.get("snippets")),
+            "sources": sources,
+            "latency": latency_dict,
             "usage": {
                 "prompt_tokens": timing.get("prompt_tokens"),
                 "completion_tokens": timing.get("completion_tokens"),
@@ -194,6 +241,39 @@ class VoicePipeline:
         transcript = stt_result["text"]
         language = stt_result["language"]
 
+        # ---- Optional web search ---------------------------------------
+        search_result = None
+        sources_list = []
+        system_prompt = self.config.system_prompt
+        if (
+            self.web_search is not None
+            and getattr(self.config, "web_search_enabled", True)
+            and needs_web_search(transcript)
+        ):
+            emit("search", {"message": "Searching the web for current information"})
+            search_result = self.web_search.search(
+                transcript, max_results=self.config.web_search_max_results
+            )
+            if search_result.get("ok"):
+                snippets = search_result.get("snippets", [])
+                if snippets:
+                    sources_list = search_result.get("sources", [])
+                    search_context = build_search_context(snippets, sources_list)
+                    system_prompt = self.config.system_prompt + "\n\n" + search_context
+                else:
+                    system_prompt = (
+                        self.config.system_prompt
+                        + "\n\nNote: A web search was attempted for this query but returned no results. "
+                        + "Clearly state that you could not find current information on this topic."
+                    )
+            else:
+                system_prompt = (
+                    self.config.system_prompt
+                    + "\n\nCRITICAL: A web search was attempted for this query because it may require current information, but the web search failed. "
+                    + "You MUST clearly tell the user that current web information could not be retrieved right now. "
+                    + "Do NOT claim to have searched the web or know real-time facts."
+                )
+
         # ---- Stage 2: LLM ------------------------------------------------
         emit("llm", {"transcript": transcript, "language": language})
         session = self.sessions.resolve(session_id)
@@ -201,10 +281,15 @@ class VoicePipeline:
         messages = list(history) + [{"role": "user", "content": transcript}]
         answer, timing = self.llm.generate(
             messages,
-            system_prompt=self.config.system_prompt,
+            system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
         )
+
+        if search_result is not None and not search_result.get("ok"):
+            disclaimer = "Current web information could not be retrieved right now. "
+            if "could not be retrieved" not in answer.lower() and "unable to retrieve" not in answer.lower():
+                answer = disclaimer + answer
 
         # ---- Stage 3: TTS (failure never loses the answer) ---------------
         emit("tts", {"message": "Speaking the response"})
@@ -229,6 +314,7 @@ class VoicePipeline:
         latency: Dict[str, Any] = {
             "recording_ms": round(float(recording_ms), 1) if recording_ms is not None else None,
             "stt_ms": stt_result["stt_ms"],
+            "search_ms": search_result.get("search_ms") if search_result else None,
             "llm_ms": timing["llm_ms"],
             "tts_ms": tts_ms,
             "tts_status": "measured" if audio else "failed",
@@ -246,6 +332,8 @@ class VoicePipeline:
             "backend_total_ms": "measured_server",
             "model_load_ms": "measured_server",
         }
+        if search_result is not None and "search_ms" in search_result:
+            sources["search_ms"] = "measured_server"
         if recording_ms is not None:
             sources["recording_ms"] = "measured_client"
             latency["total_ms"] = round(float(recording_ms) + backend_total_ms, 1)
@@ -264,6 +352,8 @@ class VoicePipeline:
             "language": language,
             "language_probability": stt_result["language_probability"],
             "response": answer,
+            "web_search": bool(search_result and search_result.get("ok") and search_result.get("snippets")),
+            "sources": sources_list,
             "audio_url": f"/api/audio/{audio['filename']}" if audio else None,
             "audio_duration_seconds": audio["duration_seconds"] if audio else None,
             "tts_voice": audio.get("voice") if audio else None,

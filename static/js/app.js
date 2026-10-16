@@ -1,7 +1,7 @@
 /* VoxAI frontend - vanilla JS, no dependencies.
  *
  * Flow: MediaRecorder captures the microphone -> POST /api/voice (SSE progress)
- * -> backend runs STT (faster-whisper) -> LLM (Ollama/Qwen3) -> TTS (Piper)
+ * -> backend runs local STT (faster-whisper) -> LLM (Gemini API) -> local TTS (Piper)
  * -> the returned WAV is played through an HTML <audio> element.
  *
  * The browser never keeps conversation history: it only holds the session id.
@@ -16,9 +16,9 @@
     settingsToggle: $('settings-toggle'), settingsPanel: $('settings-panel'),
     chatLog: $('chat-log'), emptyState: $('empty-state'),
     errorBanner: $('error-banner'), errorText: $('error-text'), errorDismiss: $('error-dismiss'),
-    latencyPanel: $('latency-panel'), latencyGrid: $('latency-grid'), latencyNote: $('latency-note'),
     micBtn: $('mic-btn'), startBtn: $('start-btn'), stopBtn: $('stop-btn'),
-    timer: $('record-timer'), newBtn: $('new-btn'), clearBtn: $('clear-btn'),
+    timer: $('record-timer'), vadHint: $('vad-hint'),
+    newBtn: $('new-btn'), clearBtn: $('clear-btn'),
     textForm: $('text-form'), textInput: $('text-input'), sendBtn: $('send-btn'),
     temperature: $('temperature'), temperatureOut: $('temperature-out'),
     maxTokens: $('max-tokens'), maxTokensOut: $('max-tokens-out'), autoplay: $('autoplay'),
@@ -29,7 +29,7 @@
   const STATUS_TEXT = {
     ready: 'Ready',
     listening: 'Listening',
-    transcribing: 'Transcribing',
+    transcribing: 'Processing',
     thinking: 'Thinking',
     speaking: 'Speaking',
     error: 'Error',
@@ -45,6 +45,9 @@
     chunks: [],
     startedAt: 0,
     timerId: null,
+    vadTimerId: null,       // VAD poll loop (auto end-of-speech)
+    audioCtx: null,         // AudioContext feeding the VAD analyser
+    stopReason: 'manual',   // 'manual' | 'auto' | 'max' - shown to the user
     lastAudio: null,        // currently playing <audio>
     healthOk: null,         // last known health status
   };
@@ -54,16 +57,28 @@
     el.statusPill.textContent = STATUS_TEXT[key] || key;
   }
 
-  function fmtMs(ms) {
-    if (ms === null || ms === undefined || Number.isNaN(ms)) return null;
-    return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${Math.round(ms)} ms`;
-  }
-
   // ---------------------------------------------------------------- errors
-  function showError(message, hint) {
+  // Stable backend error codes → the failure category shown in the banner,
+  // so the user can tell discovery, auth, quota and configuration apart.
+  const ERROR_CATEGORY = {
+    gemini_missing_credentials: 'Configuration failed',
+    gemini_auth_error: 'Authentication failed',
+    gemini_quota_exceeded: 'Quota exceeded',
+    gemini_overloaded: 'Service busy',
+    gemini_api_error: 'Gemini API error',
+    gemini_model_unavailable: 'Model discovery failed',
+    gemini_no_model_available: 'Model discovery failed',
+    gemini_discovery_failed: 'Model discovery failed',
+    llm_timeout: 'Request timed out',
+    llm_transport_error: 'Connection failed',
+    llm_empty_response: 'Empty response',
+  };
+
+  function showError(message, hint, code) {
     el.errorText.innerHTML = '';
     const span = document.createElement('span');
-    span.textContent = message;
+    const category = (code && ERROR_CATEGORY[code]) || '';
+    span.textContent = category ? `${category}: ${message}` : message;
     el.errorText.appendChild(span);
     if (hint) {
       const h = document.createElement('span');
@@ -125,47 +140,19 @@
     return n;
   }
 
-  // ---------------------------------------------------------------- latency
-  const LATENCY_ROWS = [
-    ['recording_ms', 'Recording (browser)'],
-    ['stt_ms', 'Speech → text'],
-    ['llm_ms', 'LLM answer'],
-    ['tts_ms', 'Text → speech'],
-    ['model_load_ms', 'First-call model load'],
-    ['backend_total_ms', 'Backend total'],
-    ['total_ms', 'End-to-end total'],
-  ];
-  const SOURCE_LABEL = {
-    measured_server: 'measured',
-    measured_client: 'measured (browser)',
-    measured_client_plus_server: 'measured (browser + server)',
-    estimated: 'estimated',
-  };
-
-  function showLatency(latency, extraRows) {
-    if (!latency) return;
-    el.latencyGrid.innerHTML = '';
-    const rows = (extraRows || []).concat(LATENCY_ROWS);
-    for (const [key, label] of rows) {
-      const value = fmtMs(latency[key]);
-      const source = (latency.sources || {})[key];
-      const row = document.createElement('div');
-      row.className = 'latency-row';
-      const lab = document.createElement('span');
-      lab.className = 'label';
-      lab.textContent = label;
-      const val = document.createElement('span');
-      val.className = value ? 'value' : 'value na';
-      val.textContent = value ? `${value}${source ? ` · ${SOURCE_LABEL[source] || source}` : ''}` : '—';
-      row.appendChild(lab);
-      row.appendChild(val);
-      el.latencyGrid.appendChild(row);
+  function buildMetaHtml(result) {
+    let html = `turn ${result.history_turns ?? '—'}`;
+    if (result.web_search) {
+      html += ' · <span class="tag tag-search">web search</span>';
     }
-    const streaming = latency.streaming === true;
-    el.latencyNote.textContent =
-      `${latency.mode === 'buffered' ? 'Buffered pipeline' : 'Pipeline'} · ` +
-      `streaming: ${streaming ? 'yes' : 'no'}. ` + (latency.note || '');
-    el.latencyPanel.hidden = false;
+    if (result.sources && result.sources.length) {
+      html += '<div class="source-links">Sources: ';
+      html += result.sources.map((s, i) =>
+        `<a href="${s.url}" target="_blank" rel="noopener noreferrer" class="source-link">${s.title || ('Source ' + (i+1))}</a>`
+      ).join(' · ');
+      html += '</div>';
+    }
+    return html;
   }
 
   // ---------------------------------------------------------------- health
@@ -178,11 +165,29 @@
       el.healthChip.textContent = h.status === 'ok' ? 'backend online' : `backend ${h.status}`;
       el.healthChip.className = `chip ${h.status === 'ok' ? 'ok' : 'warn'}`;
 
-      const o = h.ollama || {};
-      el.infoLlm.textContent = o.reachable
-        ? `${o.model} @ ${o.host} ${o.model_present ? '· ready' : '· model missing'}`
-        : `offline — ${o.hint || 'start ollama serve'}`;
-      el.infoLlm.style.color = (o.reachable && o.model_present) ? '' : 'var(--error)';
+      // Model discovery runs on the backend with the first chat request;
+      // report its real state instead of claiming availability up front.
+      const g = h.gemini || {};
+      const gModel = g.model || 'Gemini';
+      let llmText;
+      let llmError = false;
+      if (!g.configured) {
+        llmText = `not configured — ${g.hint || 'set GEMINI_API_KEY on the backend'}`;
+        llmError = true;
+      } else if (g.availability === 'available') {
+        llmText = `${gModel} · verified available to this API key`;
+      } else if (g.availability === 'unavailable') {
+        llmText = `model discovery found no usable Gemini model — ${g.hint || ''}`;
+        llmError = true;
+      } else if (g.availability === 'error') {
+        const reason = g.discovery_error || g.hint || 'model discovery failed';
+        llmText = `Gemini ${g.discovery === 'failed' ? 'model discovery failed' : 'error'} — ${reason}`;
+        llmError = true;
+      } else {
+        llmText = `${gModel} · model discovery runs on first message`;
+      }
+      el.infoLlm.textContent = llmText;
+      el.infoLlm.style.color = llmError ? 'var(--error)' : '';
 
       const w = h.whisper || {};
       el.infoWhisper.textContent =
@@ -218,6 +223,73 @@
     if (id && id !== state.sessionId) {
       state.sessionId = id;
       sessionStorage.setItem('voxai.session', id);
+    }
+  }
+
+  // ------------------------------------------------ auto stop (VAD)
+  // End-of-speech detection: the mic level (RMS from an AnalyserNode) is fed
+  // to the pure detector in vad.js.  After ~1.5 s of continuous silence
+  // *following some real speech* the recording is submitted automatically.
+  // Recording still only ever starts from an explicit click (consent), the
+  // Stop button always works, and a silent room never auto-triggers (the
+  // detector requires speech to have been heard first).
+  const VAD = typeof VoxVAD !== 'undefined' ? VoxVAD : null;
+  const VAD_SILENCE_S = Math.round((VAD ? VAD.DEFAULTS.silenceMs : 1500) / 100) / 10;
+
+  function setVadHint(text) {
+    if (el.vadHint) el.vadHint.textContent = text || '';
+  }
+
+  function startVad(stream) {
+    stopVad();
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!VAD || !AC) {
+      setVadHint('Auto-stop is not supported in this browser — press Stop when finished.');
+      return;
+    }
+    try {
+      const ctx = new AC();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser); // analysis only — never connected to output
+      const samples = new Uint8Array(analyser.fftSize);
+      const detector = VAD.createSilenceDetector();
+      state.audioCtx = ctx;
+      state.vad = detector;
+      state.vadTimerId = setInterval(() => {
+        if (!state.recording) return;
+        analyser.getByteTimeDomainData(samples);
+        const verdict = detector.push(VAD.frameRms(samples), Date.now());
+        if (verdict === 'end_of_speech') {
+          stopRecording('auto');
+        } else if (verdict === 'max_duration') {
+          stopRecording('max');
+        } else if (detector.state().speechSeen) {
+          setVadHint(verdict === 'speaking'
+            ? 'Listening…'
+            : `Silence ${Math.round(detector.state().silenceMs / 1000)}s — sends in ${VAD_SILENCE_S}s`);
+        } else {
+          setVadHint((Date.now() - state.startedAt) > 5000
+            ? 'No speech detected yet — check the microphone, or press Stop.'
+            : 'Listening — speak now');
+        }
+      }, 60);
+    } catch (err) {
+      // VAD is best-effort: manual Stop keeps working regardless.
+      setVadHint(`Auto-stop unavailable (${err.message || 'error'}) — press Stop when finished.`);
+    }
+  }
+
+  function stopVad() {
+    if (state.vadTimerId) {
+      clearInterval(state.vadTimerId);
+      state.vadTimerId = null;
+    }
+    state.vad = null;
+    if (state.audioCtx) {
+      try { state.audioCtx.close(); } catch (_) { /* already closed */ }
+      state.audioCtx = null;
     }
   }
 
@@ -311,6 +383,7 @@
       showError(`Recording failed: ${(e.error && e.error.message) || 'unknown error'}`);
       stream.getTracks().forEach((t) => t.stop());
       clearInterval(state.timerId);
+      stopVad();
       setRecordingUi(false);
       setStatus('ready');
     };
@@ -323,10 +396,14 @@
     }, 100);
     setRecordingUi(true);
     setStatus('listening');
+    setVadHint(`Listening — speak naturally; sends ${VAD_SILENCE_S}s after you stop, or press Stop.`);
+    startVad(stream);
   }
 
-  function stopRecording() {
-    if (!state.recording || !state.recorder) return;
+  function stopRecording(reason) {
+    if (!state.recording || !state.recorder) return; // one stop per recording
+    stopVad();
+    state.stopReason = reason || 'manual';
     setRecordingUi(false);
     setStatus('transcribing');
     if (state.recorder.state !== 'inactive') state.recorder.stop();
@@ -370,8 +447,11 @@
     state.busy = true;
     setRecordingUi(false);
     setStatus('transcribing');
-    const started = performance.now();
-
+    setVadHint(state.stopReason === 'auto'
+      ? `Sent automatically after ${VAD_SILENCE_S}s of silence.`
+      : state.stopReason === 'max'
+        ? 'Stopped at the recording time limit and sent.'
+        : 'Recording sent — press Start (or the mic) for the next question.');
     let transcriptShown = false;
     const onProgress = (p) => {
       if (p.stage === 'stt') setStatus('transcribing');
@@ -384,11 +464,11 @@
         }
       } else if (p.stage === 'tts') setStatus('speaking');
     };
-    const onDone = (result) => finishVoice(result, performance.now() - started, transcriptShown);
+    const onDone = (result) => finishVoice(result, transcriptShown);
     const onError = (body) => {
       state.busy = false;
       setStatus('error');
-      showError(body.error || 'The voice pipeline failed.', body.hint);
+      showError(body.error || 'The voice pipeline failed.', body.hint, body.code);
       if (!body.error) console.error('voice pipeline error', body);
       setTimeout(() => { if (!state.busy && !state.recording) setStatus('ready'); }, 3000);
     };
@@ -409,7 +489,7 @@
         await readSse(resp, {
           progress: onProgress,
           done: (payload) => onDone(payload),
-          error: (payload) => onError({ error: payload.error, hint: payload.hint }),
+          error: (payload) => onError({ error: payload.error, hint: payload.hint, code: payload.code }),
         });
         if (state.busy) {
           // Stream closed without a final done/error event (connection dropped).
@@ -429,7 +509,7 @@
     }
   }
 
-  function finishVoice(payload, wallMs, transcriptShown) {
+  function finishVoice(payload, transcriptShown) {
     const result = payload; // SSE done event carries {ok, ...result}
     state.busy = false;
     adoptSession(result.session_id);
@@ -442,18 +522,11 @@
       // Update the last user bubble's meta with language probability.
       const last = el.chatLog.querySelector('.bubble-user:last-of-type .bubble-meta');
       if (last && result.language) {
-        const prob = result.language_probability
-          ? ` · conf ${(result.language_probability * 100).toFixed(0)}%` : '';
-        last.innerHTML = `<span class="tag">${result.language}</span>${prob}`;
+        last.innerHTML = `<span class="tag">${result.language}</span>`;
       }
     }
 
-    const usage = result.usage || {};
-    const lat = result.latency || {};
-    const metaBits = [];
-    if (usage.model) metaBits.push(`<span class="tag">${usage.model}</span>`);
-    metaBits.push(`turn ${result.history_turns ?? '—'}`);
-    const metaHtml = metaBits.join(' · ');
+    const metaHtml = buildMetaHtml(result);
 
     const bubble = addBubble('assistant', result.response || '(no answer)', metaHtml);
 
@@ -491,14 +564,6 @@
       setStatus('ready');
     }
 
-    // Client-side wall-clock (upload + full buffered processing).
-    const clientLat = Object.assign({}, lat, {
-      total_ms: lat.total_ms != null ? Math.max(lat.total_ms, Math.round(wallMs)) : Math.round(wallMs),
-      sources: Object.assign({}, lat.sources, {
-        total_ms: 'measured_client_plus_server',
-      }),
-    });
-    showLatency(clientLat, [['wall_ms', 'Browser wall-clock']]);
     pollHealth();
   }
 
@@ -508,7 +573,6 @@
     setRecordingUi(false);
     setStatus('thinking');
     hideError();
-    const started = performance.now();
     try {
       await ensureSession();
       const resp = await fetch('/api/chat', {
@@ -523,20 +587,16 @@
       });
       const body = await resp.json();
       if (!resp.ok) {
-        showError(body.error || `Chat failed (HTTP ${resp.status}).`, body.hint);
+        showError(body.error || `Chat failed (HTTP ${resp.status}).`, body.hint, body.code);
         setStatus('error');
         setTimeout(() => { if (!state.busy) setStatus('ready'); }, 3000);
         return;
       }
       addBubble('user', message);
-      const wallMs = performance.now() - started;
       adoptSession(body.session_id);
       window.__voxaiTurns = body.history_turns || 0;
-      const usage = body.usage || {};
-      addBubble('assistant', body.response,
-        `${usage.model ? `<span class="tag">${usage.model}</span> · ` : ''}turn ${body.history_turns ?? '—'}`);
-      const lat = Object.assign({}, body.latency, { wall_ms: Math.round(wallMs) });
-      showLatency(lat, [['wall_ms', 'Browser wall-clock']]);
+      const chatMeta = buildMetaHtml(body);
+      addBubble('assistant', body.response, chatMeta);
       setStatus('ready');
       pollHealth();
     } catch (err) {
@@ -557,8 +617,6 @@
   function resetChatView() {
     el.chatLog.innerHTML = '';
     el.chatLog.appendChild(el.emptyState || buildEmptyState());
-    el.latencyPanel.hidden = true;
-    el.latencyGrid.innerHTML = '';
     hideError();
     window.__voxaiTurns = 0;
     if (state.lastAudio) { try { state.lastAudio.pause(); } catch (_) {} state.lastAudio = null; }

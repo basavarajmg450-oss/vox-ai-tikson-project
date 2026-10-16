@@ -133,7 +133,9 @@ class SpeechToTextService:
         options: Dict[str, Any] = {
             "language": self.config.whisper_language or None,
             "task": "transcribe",
-            "beam_size": 5,
+            # Greedy (1) by default: beam search is the single largest CPU cost
+            # per transcription and buys little accuracy on short voice clips.
+            "beam_size": max(1, int(getattr(self.config, "whisper_beam_size", 1) or 1)),
             "vad_filter": self.config.whisper_vad,
         }
         if self.config.whisper_vad:

@@ -1,12 +1,12 @@
-"""Integration checks against the REAL local models (Ollama + Whisper + Piper).
+"""Integration checks against Gemini API, Whisper and Piper.
 
 Skipped by default so the unit suite stays fast and dependency-free:
 
     set VOXAI_INTEGRATION=1          # PowerShell
     .venv\\Scripts\\python.exe -m pytest -m integration -v
 
-Requirements: ``ollama serve`` running with the configured model pulled, and
-the Whisper + Piper assets downloaded (``python scripts/prefetch_assets.py``).
+Requirements: ``GEMINI_API_KEY`` configured, plus Whisper and Piper assets
+downloaded (``python scripts/prefetch_assets.py``).
 """
 
 from __future__ import annotations
@@ -42,10 +42,27 @@ def real_client(real_app):
 
 def test_health_real_services_ready(real_client):
     body = real_client.get("/api/health").get_json()
-    assert body["ollama"]["reachable"] is True, "is `ollama serve` running?"
-    assert body["ollama"]["model_present"] is True, "model missing: run `ollama pull qwen3:4b`"
+    assert body["gemini"]["configured"] is True, "set GEMINI_API_KEY in .env"
+    assert body["gemini"]["availability"] == "not_checked"
+    assert body["gemini"]["discovery"] == "not_attempted"  # health makes no API request
     assert body["piper"]["model_present"] is True, "run `python scripts/prefetch_assets.py`"
     assert body["status"] == "ok", f"startup issues: {body['startup_issues']}"
+
+
+def test_model_discovery_selects_a_real_available_model(real_app):
+    """Free ``models.list()`` check against the real key (no generation call)."""
+    svc = real_app.extensions["voxai"].services
+
+    discovered = svc.llm.discover_models(refresh=True)
+
+    assert discovered, "no text-generation Gemini model available to this API key"
+    assert svc.llm.selected_model in discovered
+    status = svc.llm.status()
+    assert status["discovery"] == "ok"
+    assert status["availability"] == "available"  # verified, not assumed
+    assert "unit-test-key" not in repr(status)
+    # The preferred model, when it exists in the discovered list, comes first:
+    assert discovered[0] == svc.llm.selected_model
 
 
 def test_chat_real_llm_answers(real_client):
@@ -119,3 +136,79 @@ def test_voice_real_end_to_end(real_client, real_app):
     assert lat["streaming"] is False
     audio = real_client.get(body["audio_url"])
     assert audio.status_code == 200 and audio.data[:4] == b"RIFF"
+
+
+# ------------------------------------------------------------------ voice consistency
+# The configured pair is a verified same-gender pair (male):
+#   en_US-ryan-medium  - male US-English single speaker (finetuned from lessac)
+#   hi_IN-rohan-medium - male Hindi single speaker ("Hindi Mono Male" database)
+# A mixed-gender pair causes gender switches between languages and must not be used.
+
+
+def test_tts_same_voice_for_every_english_response(real_app):
+    """Greeting-style, answer, follow-up and error-style text: one voice."""
+    svc = real_app.extensions["voxai"].services
+    expected = Path(svc.tts.config.piper_model_path).name
+    texts = [
+        "Hello! I am VoxAI, your local voice assistant.",   # greeting
+        "The capital of France is Paris.",                   # normal answer
+        "About two million people live there.",              # follow-up
+        "Sorry, I could not complete that request.",         # error-style message
+    ]
+    voices = {svc.tts.synthesize(t)["voice"] for t in texts}
+    assert voices == {expected}, f"voice changed between responses: {voices}"
+
+
+def test_tts_same_voice_for_every_hindi_response(real_app):
+    """Hindi responses all use the single configured Hindi voice."""
+    svc = real_app.extensions["voxai"].services
+    hi = Path(svc.tts.config.piper_model_path_hi)
+    assert hi.exists(), "run .venv\\Scripts\\python.exe scripts\\prefetch_assets.py"
+    texts = [
+        "नमस्ते! मैं वॉक्सआई हूँ, आपकी स्थानीय सहायक।",
+        "भारत की राजधानी नई दिल्ली है।",
+        "वहाँ लगभग बीस लाख लोग रहते हैं।",
+        "क्षमा करें, मैं वह अनुरोध पूरा नहीं कर सका।",
+    ]
+    voices = {svc.tts.synthesize(t, language="hi")["voice"] for t in texts}
+    assert voices == {hi.name}, f"Hindi voice changed between responses: {voices}"
+
+
+def test_tts_alternating_languages_use_fixed_language_models(real_app):
+    """EN/HI/EN/HI turns: language selects the model, never a random speaker."""
+    svc = real_app.extensions["voxai"].services
+    en = Path(svc.tts.config.piper_model_path).name
+    hi = Path(svc.tts.config.piper_model_path_hi).name
+    for turn, lang in enumerate([None, "hi", "en", "hi", None, "hi"]):
+        out = svc.tts.synthesize(f"Voice consistency check, turn {turn}.", language=lang)
+        want = hi if (lang or "").startswith("hi") else en
+        assert out["voice"] == want, (
+            f"language={lang!r} selected {out['voice']!r}, expected {want!r}"
+        )
+
+
+def test_voice_pipeline_reports_voice_matching_detected_language(real_client, real_app):
+    """Full /api/voice run: tts_voice always equals the configured model for
+    the detected language.  A failed voice surfaces as tts_error with
+    audio_url None - it can never fall back to a different voice."""
+    svc = real_app.extensions["voxai"].services
+    hi = Path(svc.tts.config.piper_model_path_hi)
+    if not hi.exists():
+        pytest.skip("Hindi voice not installed")
+    en = Path(svc.tts.config.piper_model_path).name
+    out = svc.tts.synthesize(
+        "नमस्ते, मेरा नाम वॉक्सआई है। मैं आपकी क्या मदद कर सकती हूँ?", language="hi"
+    )
+    path = Path(svc.tts.audio_dir) / out["filename"]
+    with open(path, "rb") as fh:
+        resp = real_client.post(
+            "/api/voice",
+            data={"audio": (fh, "hindi.wav", "audio/wav")},
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    want = hi.name if body["language"].startswith("hi") else en
+    assert body["tts_voice"] == want
+    # Backend timing instrumentation must survive the frontend cleanup.
+    assert body["latency"]["stt_ms"] > 0 and body["latency"]["tts_ms"] > 0

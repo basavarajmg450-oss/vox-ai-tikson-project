@@ -1,15 +1,16 @@
-"""Measure real end-to-end latency of the local VoxAI pipeline.
+"""Measure end-to-end latency of the VoxAI pipeline.
 
-Run (PowerShell, with `ollama serve` running and assets downloaded):
+Run (PowerShell, with ``GEMINI_API_KEY`` configured and assets downloaded):
 
     .venv\\Scripts\\python.exe scripts\\benchmark.py --turns 3
 
-It warms each model once (reporting the load cost separately), then measures
-per-stage latencies over several turns and prints a markdown table. Results
-are written to docs/benchmark-results.md (and .json).
+It reports local model-load costs separately, then measures per-stage
+latencies over several turns and prints a markdown table. Gemini is remote
+and has no local model-load stage. Results are written to docs/benchmark-results.md
+(and .json).
 
 Every number printed is measured with time.perf_counter() - nothing is
-estimated. No network inference is used: STT/LLM/TTS all run locally.
+estimated. Speech recognition and synthesis remain local; chat uses Gemini.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ def main() -> int:
 
     results: dict = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "model": cfg.ollama_model,
+        "model": cfg.gemini_model,
         "whisper_model": cfg.whisper_model,
         "device": cfg.whisper_device,
         "compute_type": cfg.whisper_compute_type,
@@ -69,10 +70,9 @@ def main() -> int:
     t0 = time.perf_counter()
     health = client.get("/api/health").get_json()
     results["stages"]["health_check_ms"] = ms(t0)
-    print(f"health: {health['status']} | ollama reachable={health['ollama']['reachable']} "
-          f"model_present={health['ollama']['model_present']}")
+    print(f"health: {health['status']} | Gemini configured={health['gemini']['configured']}")
     if health["status"] != "ok":
-        print("!! backend not ready - run `ollama serve` and scripts/prefetch_assets.py first")
+        print("!! backend not ready - configure GEMINI_API_KEY and run scripts/prefetch_assets.py")
         return 1
 
     # ---------------------------------------------------------------- TTS
@@ -109,21 +109,27 @@ def main() -> int:
     print(f"transcript: {tr['text']!r} (language={tr['language']})")
 
     # ---------------------------------------------------------------- LLM
-    print(f"\n== LLM ({cfg.ollama_model}) ==")
+    print(f"\n== LLM (Gemini {cfg.gemini_model}) ==")
     sid = client.post("/api/session/new").get_json()["session_id"]
     t0 = time.perf_counter()
-    client.post("/api/chat", json={"message": SAMPLE_TEXT, "session_id": sid})
-    llm_load_ms = ms(t0)
-    print(f"first call (includes model load): {llm_load_ms} ms")
+    first_response = client.post("/api/chat", json={"message": SAMPLE_TEXT, "session_id": sid})
+    if first_response.status_code != 200:
+        print(f"!! Gemini request failed: {first_response.status_code} {first_response.get_json()}")
+        return 1
+    first_request_ms = ms(t0)
+    print(f"first request: {first_request_ms} ms")
     llm_runs = []
     for i in range(args.turns):
         text = SAMPLE_TEXT if i % 2 == 0 else FOLLOWUP_TEXT
         t0 = time.perf_counter()
         resp = client.post("/api/chat", json={"message": text, "session_id": sid})
         llm_runs.append(ms(t0))
+        if resp.status_code != 200:
+            print(f"  !! Gemini request failed: {resp.status_code} {resp.get_json()}")
+            return 1
         body = resp.get_json()
         print(f"  turn {i + 1}: {llm_runs[-1]} ms | {body['response'][:90]!r}")
-    results["stages"]["llm_first_ms"] = llm_load_ms
+    results["stages"]["llm_first_request_ms"] = first_request_ms
     results["stages"]["llm_ms"] = llm_runs
     results["stages"]["llm_reported_ms"] = body["latency"]["llm_ms"]
 
@@ -178,7 +184,7 @@ def main() -> int:
         f"| TTS synthesis | {fmt(tts_runs)} |",
         f"| STT first call (incl. load) | {results['stages']['stt_load_ms']} ms |",
         f"| STT transcription | {fmt(stt_runs)} |",
-        f"| LLM first call (incl. load) | {results['stages']['llm_first_ms']} ms |",
+        f"| LLM first request | {results['stages']['llm_first_request_ms']} ms |",
         f"| LLM chat round-trip | {fmt(llm_runs)} |",
         f"| Full `/api/voice` wall-clock | {fmt(voice_runs)} |",
         "",

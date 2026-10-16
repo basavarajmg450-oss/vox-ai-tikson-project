@@ -1,4 +1,4 @@
-"""``POST /api/chat`` - text turn against the local LLM.
+"""``POST /api/chat`` - text turn against the Gemini API.
 
 The client sends only a message (and optionally its session id, temperature and
 max_tokens).  Any ``history`` field a client includes is deliberately ignored:

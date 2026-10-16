@@ -3,6 +3,14 @@
 The Piper voice is loaded at most once per model file and reused for every
 request; synthesis writes a fresh WAV into a dedicated directory that is served
 only through ``GET /api/audio/<filename>``.  Old files are swept with a TTL.
+
+Exactly one voice model per language is used - fixed by ``PIPER_MODEL_PATH``
+(English) and ``PIPER_MODEL_PATH_HI`` (Hindi).  Language detection may choose
+*which language model* speaks, but never a different speaker within a language,
+and a missing model raises a clear error instead of falling back to another
+voice.  Both configured voices are single-speaker MALE models of the same
+medium quality (en_US-ryan / hi_IN-rohan), so responses keep one consistent
+speaker identity and gender across greetings, answers, follow-ups and turns.
 """
 
 from __future__ import annotations
@@ -118,17 +126,38 @@ class TTSService:
 
     # -- voice selection ------------------------------------------------------
     def voice_for_language(self, language: Optional[str]) -> Path:
-        """Pick the default voice, or the Hindi voice when available."""
+        """Return the single fixed voice model for ``language``.
+
+        Language detection may select the language model (English or Hindi),
+        but the speaker is deterministic: one configured, single-speaker model
+        per language, reused on every request and turn.  When Hindi is
+        detected but the Hindi model is unavailable, this raises a clear
+        error instead of silently speaking with the English voice.
+        """
         default = Path(self.config.piper_model_path)
         if language and str(language).startswith("hi"):
             hi = Path(self.config.piper_model_path_hi) if self.config.piper_model_path_hi else None
             if hi and hi.exists():
                 return hi
+            raise ApiError(
+                "Hindi was detected but the Hindi voice model is not installed.",
+                503,
+                "tts_hindi_voice_missing",
+                hint=(
+                    "Download it with .venv\\Scripts\\python.exe "
+                    "scripts\\prefetch_assets.py (or set PIPER_MODEL_PATH_HI "
+                    "in .env to an installed voice)."
+                ),
+            )
         return default
 
     # -- synthesis --------------------------------------------------------------
     def synthesize(self, text: str, language: Optional[str] = None) -> Dict[str, Any]:
         """Speak ``text`` and return WAV metadata for ``/api/audio/``.
+
+        ``language`` only selects the language model through
+        :meth:`voice_for_language`; the speaker itself is fixed per language
+        and the chosen model is loaded once, then reused for every request.
 
         Returns ``{filename, duration_seconds, tts_ms, tts_load_ms, voice}``.
         Raises :class:`~services.errors.ApiError` (400/503) on failure; callers

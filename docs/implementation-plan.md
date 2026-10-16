@@ -1,11 +1,13 @@
 # VoxAI — implementation plan
 
-Short plan written before the build (process step 2 of the assignment).
+Original plan written before implementation. It predates the current Gemini
+integration; the current runtime uses local Faster-Whisper and Piper with
+Google Gemini for chat.
 
 ## Goal
 
-A browser voice assistant whose three AI stages all run locally:
-**STT (faster-whisper)** → **LLM (Ollama / qwen3:4b)** → **TTS (Piper)**, with
+A browser voice assistant with local speech stages and an API-backed LLM:
+**STT (faster-whisper)** → **LLM (Google Gemini API)** → **TTS (Piper)**, with
 authoritative session history on the Flask backend.
 
 ## Order of work
@@ -20,10 +22,10 @@ authoritative session history on the Flask backend.
    typed exception carrying an HTTP status + human message.
    - `speech_to_text.py` — faster-whisper wrapper (bytes in → text + language),
      auto language detection (en/hi), silence/short/undecodable audio handled.
-   - `llm_service.py` — `ollama.Client`, `think=False`, history bounded by
-     `MAX_HISTORY_TURNS`, `num_predict` bounded by `MAX_RESPONSE_TOKENS`,
-     reasoning blocks stripped from the final text, clear errors for
-     server-down / model-missing / timeout.
+   - `llm_service.py` — official `google-genai` client, backend-only
+     `GEMINI_API_KEY`, configurable model/timeout, history bounded by
+     `MAX_HISTORY_TURNS`, output bounded by `MAX_RESPONSE_TOKENS`, concise
+     spoken-style answers and safe errors for credentials/quota/model/timeout.
    - `text_to_speech.py` — Piper `PiperVoice` loaded **once** (module singleton,
      warm-up in a background thread), WAV written into a dedicated temp dir,
      TTL sweep for old files, optional Hindi voice when detected language is
@@ -40,11 +42,11 @@ authoritative session history on the Flask backend.
    4xx codes and typed errors mapped to 4xx/5xx JSON.
 5. **Frontend** (`templates/index.html`, `static/css/style.css`,
    `static/js/app.js`) — dark, accessible, MediaRecorder capture, status state
-   machine (Ready → Listening → Transcribing → Thinking → Speaking / Error),
-   bubbles, `<audio>` playback with autoplay, latency panel, session controls,
+   machine (Ready → Listening → Transcribing → Thinking → Speaking / Error),    bubbles, `<audio>` playback with autoplay, session controls,
    settings.
 6. **Tests** — `tests/` with mocked services for unit tests (no model download
-   required) plus `-m integration` tests that hit the real local services.
+   required) plus `-m integration` tests that hit Gemini and the real local
+   speech services.
 7. **Verification** — run unit tests, start the server, hit every endpoint with
    `curl`, run the integration suite, exercise the UI in a browser, then write
    README + docs (architecture diagram, demo checklist, multi-turn example,

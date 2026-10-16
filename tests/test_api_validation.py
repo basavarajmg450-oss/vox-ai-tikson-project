@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 
+from services.llm_service import LLMService
 from tests.conftest import make_audio
 
 
@@ -34,6 +35,20 @@ def test_chat_rejects_blank_message(client):
 def test_chat_rejects_oversized_message(client, cfg):
     resp = client.post("/api/chat", json={"message": "x" * (cfg.max_message_chars + 1)})
     assert resp.status_code == 413
+
+
+def test_chat_without_gemini_credentials_returns_safe_service_error(client, svc):
+    svc.config.gemini_api_key = ""
+    svc.llm = LLMService(svc.config)
+    svc.pipeline.llm = svc.llm
+
+    resp = client.post("/api/chat", json={"message": "hello"})
+
+    assert resp.status_code == 503
+    body = resp.get_json()
+    assert body["code"] == "gemini_missing_credentials"
+    assert "GEMINI_API_KEY" in body["error"]
+    assert "unit-test-key" not in repr(body)
 
 
 def test_chat_rejects_bad_temperature(client):

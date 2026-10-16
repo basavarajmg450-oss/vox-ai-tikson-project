@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are VoxAI, a helpful voice assistant running entirely on the user's machine.\n"
+    "You are VoxAI, a helpful voice assistant with local speech recognition and synthesis.\n"
     "- Be friendly, accurate and concise: normally 2-4 short sentences.\n"
     "- Your answer is read aloud by a text-to-speech engine, so write plain prose: "
     "no markdown, no bullet points, no code blocks, no emojis, no URLs unless asked.\n"
@@ -148,10 +148,17 @@ def resolve_path(raw: str, default: Path) -> Path:
 class Config:
     """All runtime settings for VoxAI."""
 
-    # ---- LLM (Ollama) ------------------------------------------------
-    ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "qwen3:4b"
-    ollama_timeout_s: float = 180.0
+    # ---- LLM (Google Gemini) -----------------------------------------
+    gemini_api_key: str = ""
+    #: Optional *preferred* model.  It is only used when model discovery
+    #: finds it among the models available to the API key; otherwise the
+    #: best discovered text-generation model is selected automatically.
+    #: An empty value means pure automatic selection.
+    gemini_model: str = "gemini-2.5-flash"
+    #: How many discovered candidates one request may try when a model is
+    #: rejected as unavailable/unsupported (small, bounded - never endless).
+    gemini_model_attempts: int = 3
+    gemini_timeout_s: float = 60.0
     llm_temperature: float = 0.6
     max_response_tokens: int = 200
     max_history_turns: int = 8
@@ -164,11 +171,24 @@ class Config:
     whisper_download_root: Path = BASE_DIR / "models" / "whisper"
     whisper_language: str = ""          # "" means auto-detect
     whisper_vad: bool = True
+    #: Greedy decoding (1) is roughly 2x faster than the old beam-5 default
+    #: on CPU; raise it (2-10) if transcription accuracy ever regresses.
+    whisper_beam_size: int = 1
 
     # ---- TTS (Piper) --------------------------------------------------
-    piper_model_path: Path = BASE_DIR / "models" / "voices" / "en_US-lessac-medium.onnx"
+    #: Both configured voices are MALE speakers of the same medium quality,
+    #: so the speaker gender stays consistent across English and Hindi.
+    piper_model_path: Path = BASE_DIR / "models" / "voices" / "en_US-ryan-medium.onnx"
+    #: Hindi voice (male speaker hi_IN-rohan-medium).
     piper_model_path_hi: Path = BASE_DIR / "models" / "voices" / "hi_IN-rohan-medium.onnx"
     piper_length_scale: float = 1.0
+
+    # ---- LLM reasoning budget ------------------------------------------
+    #: Thinking tokens Gemini may spend before answering.  0 (default) skips
+    #: reasoning entirely - much faster for short spoken answers and it stops
+    #: thinking from eating MAX_RESPONSE_TOKENS (which produced occasional
+    #: empty answers).  -1 leaves the provider default untouched.
+    gemini_thinking_budget: int = 0
 
     # ---- HTTP / runtime ------------------------------------------------
     host: str = "127.0.0.1"
@@ -184,6 +204,12 @@ class Config:
     strict_startup: bool = False
     run_integration: bool = False
 
+    # ---- Web search -------------------------------------------------
+    web_search_enabled: bool = True
+    web_search_provider: str = "duckduckgo"
+    web_search_timeout_s: float = 8.0
+    web_search_max_results: int = 3
+
     # --------------------------------------------------------------------
     @classmethod
     def from_env(cls) -> "Config":
@@ -193,9 +219,12 @@ class Config:
         holds an unusable value.
         """
         return cls(
-            ollama_host=_str_env("OLLAMA_HOST", "http://localhost:11434").rstrip("/"),
-            ollama_model=_str_env("OLLAMA_MODEL", "qwen3:4b"),
-            ollama_timeout_s=_float_env("OLLAMA_TIMEOUT_S", 180.0, minimum=1.0, maximum=3600.0),
+            gemini_api_key=_str_env("GEMINI_API_KEY", ""),
+            # Optional preferred model; an explicitly empty value disables the
+            # preference so a suitable model is discovered automatically.
+            gemini_model=_str_env("GEMINI_MODEL", "gemini-2.5-flash"),
+            gemini_model_attempts=_int_env("GEMINI_MODEL_ATTEMPTS", 3, minimum=1, maximum=10),
+            gemini_timeout_s=_float_env("GEMINI_TIMEOUT_S", 60.0, minimum=1.0, maximum=3600.0),
             llm_temperature=_float_env("LLM_TEMPERATURE", 0.6, minimum=0.0, maximum=2.0),
             max_response_tokens=_int_env("MAX_RESPONSE_TOKENS", 200, minimum=1, maximum=4096),
             max_history_turns=_int_env("MAX_HISTORY_TURNS", 8, minimum=0, maximum=100),
@@ -209,15 +238,17 @@ class Config:
             ),
             whisper_language=_str_env("WHISPER_LANGUAGE", "").lower(),
             whisper_vad=_bool_env("WHISPER_VAD", True),
+            whisper_beam_size=_int_env("WHISPER_BEAM_SIZE", 1, minimum=1, maximum=10),
             piper_model_path=resolve_path(
-                _str_env("PIPER_MODEL_PATH", "./models/voices/en_US-lessac-medium.onnx"),
-                BASE_DIR / "models" / "voices" / "en_US-lessac-medium.onnx",
+                _str_env("PIPER_MODEL_PATH", "./models/voices/en_US-ryan-medium.onnx"),
+                BASE_DIR / "models" / "voices" / "en_US-ryan-medium.onnx",
             ),
             piper_model_path_hi=resolve_path(
                 _str_env("PIPER_MODEL_PATH_HI", "./models/voices/hi_IN-rohan-medium.onnx"),
                 BASE_DIR / "models" / "voices" / "hi_IN-rohan-medium.onnx",
             ),
             piper_length_scale=_float_env("PIPER_LENGTH_SCALE", 1.0, minimum=0.1, maximum=4.0),
+            gemini_thinking_budget=_int_env("GEMINI_THINKING_BUDGET", 0, minimum=-1, maximum=24576),
             host=_str_env("HOST", "127.0.0.1"),
             port=_int_env("PORT", 5000, minimum=1, maximum=65535),
             audio_dir=resolve_path(_str_env("AUDIO_DIR", "./var/audio"), BASE_DIR / "var" / "audio"),
@@ -234,6 +265,10 @@ class Config:
             max_sessions=_int_env("MAX_SESSIONS", 500, minimum=1),
             strict_startup=_bool_env("STRICT_STARTUP", False),
             run_integration=_bool_env("RUN_INTEGRATION", False),
+            web_search_enabled=_bool_env("WEB_SEARCH_ENABLED", True),
+            web_search_provider=_str_env("WEB_SEARCH_PROVIDER", "duckduckgo"),
+            web_search_timeout_s=_float_env("WEB_SEARCH_TIMEOUT_S", 8.0, minimum=1.0, maximum=30.0),
+            web_search_max_results=_int_env("WEB_SEARCH_MAX_RESULTS", 3, minimum=1, maximum=10),
         )
 
     # --------------------------------------------------------------------
@@ -279,7 +314,8 @@ class Config:
                 "component": "piper",
                 "message": (
                     f"Hindi voice not found at {self.piper_model_path_hi}; Hindi "
-                    "answers will be spoken with the default English voice."
+                    "answers keep their text but speech fails with a clear error "
+                    "instead of switching to a different voice."
                 ),
                 "fix": _DOWNLOAD_FIX,
             })
@@ -322,12 +358,15 @@ class Config:
     def public(self) -> Dict[str, object]:
         """Settings safe to expose through ``GET /api/health``."""
         return {
-            "ollama_host": self.ollama_host,
-            "ollama_model": self.ollama_model,
+            "gemini_model": self.gemini_model,
+            "gemini_model_attempts": self.gemini_model_attempts,
+            "gemini_timeout_s": self.gemini_timeout_s,
+            "gemini_configured": bool(self.gemini_api_key),
             "whisper_model": self.whisper_model,
             "whisper_device": self.whisper_device,
             "whisper_compute_type": self.whisper_compute_type,
             "whisper_language": self.whisper_language or "auto",
+            "whisper_beam_size": self.whisper_beam_size,
             "piper_model_path": str(self.piper_model_path),
             "piper_hindi_voice_available": self.piper_model_path_hi.exists(),
             "max_history_turns": self.max_history_turns,
@@ -335,4 +374,7 @@ class Config:
             "temperature": self.llm_temperature,
             "max_message_chars": self.max_message_chars,
             "max_audio_bytes": self.max_audio_bytes,
+            "web_search_enabled": self.web_search_enabled,
+            "web_search_provider": self.web_search_provider,
+            "web_search_max_results": self.web_search_max_results,
         }

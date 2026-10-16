@@ -6,7 +6,7 @@ source itself contains no literal tag sequences.
 
 from __future__ import annotations
 
-from services.llm_service import THINK_HEADROOM_TOKENS, cap_answer, strip_thinking
+from services.llm_service import cap_answer, strip_thinking
 
 LT = chr(60)  # '<'
 GT = chr(62)  # '>'
@@ -42,10 +42,6 @@ def test_strip_keeps_plain_text_untouched():
     assert strip_thinking("") == ""
 
 
-def test_strip_removes_no_think_marker():
-    assert "/no_think" not in strip_thinking("Hello /no_think world")
-
-
 def test_cap_answer_keeps_short_text():
     assert cap_answer("Short.", 200) == "Short."
 
@@ -61,8 +57,3 @@ def test_cap_answer_cuts_on_sentence_boundary():
 def test_cap_answer_never_returns_empty_for_long_input():
     long_text = "word " * 500
     assert cap_answer(long_text, 10)
-
-
-def test_headroom_constant_is_positive():
-    # The answer budget must never be starved by the reasoning budget.
-    assert THINK_HEADROOM_TOKENS >= 256

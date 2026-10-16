@@ -1,4 +1,4 @@
-"""VoxAI - a fully local voice assistant (Flask application factory).
+"""VoxAI - a Flask voice assistant with local speech and Gemini chat.
 
 Run it with::
 
@@ -125,7 +125,11 @@ def print_startup_report(app: Flask) -> None:
     context = app.extensions["voxai"]
     cfg = context.config
     print(f"\n  VoxAI {context.version} - local voice assistant")
-    print(f"  http://{cfg.host}:{cfg.port}  (LLM: {cfg.ollama_model} @ {cfg.ollama_host})")
+    llm_label = (
+        f"Gemini (preferred: {cfg.gemini_model})" if cfg.gemini_model
+        else "Gemini (automatic model discovery)"
+    )
+    print(f"  http://{cfg.host}:{cfg.port}  (LLM: {llm_label})")
     if context.issues:
         print("\n  Startup issues:")
         for issue in context.issues:
@@ -133,7 +137,14 @@ def print_startup_report(app: Flask) -> None:
             print(f"    [{marker}] {issue['message']}")
             print(f"            fix: {issue['fix']}")
     else:
-        print("  All required model files found.")
+        print("  All required local model files found.")
+    if not cfg.gemini_api_key:
+        print("  Gemini is not configured. Set GEMINI_API_KEY in .env to enable chat.")
+    else:
+        print(
+            "  Model selection: Gemini models available to GEMINI_API_KEY are "
+            "discovered automatically on the first message."
+        )
     print()
 
 

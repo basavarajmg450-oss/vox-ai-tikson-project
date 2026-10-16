@@ -5,8 +5,10 @@
 
 Downloads:
   * the faster-whisper model (default: base, override with WHISPER_MODEL)
-  * the English Piper voice  (en_US-lessac-medium)
-  * the Hindi Piper voice    (hi_IN-rohan-medium), used when detected Hindi
+  * the English Piper voice  (en_US-ryan-medium, male speaker)
+  * the Hindi Piper voice    (hi_IN-rohan-medium, male speaker, so the
+                              voice keeps one consistent gender across
+                              English and Hindi responses)
 
 Nothing is downloaded twice; existing files are skipped.
 """
@@ -25,7 +27,7 @@ from config import Config  # noqa: E402
 VOICES_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 #: (relative voice dir, file stem)
 PIPER_VOICES = [
-    ("en/en_US/lessac/medium", "en_US-lessac-medium"),
+    ("en/en_US/ryan/medium", "en_US-ryan-medium"),
     ("hi/hi_IN/rohan/medium", "hi_IN-rohan-medium"),
 ]
 

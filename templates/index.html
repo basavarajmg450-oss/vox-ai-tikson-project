@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>VoxAI — local voice assistant</title>
+  <title>VoxAI — voice assistant</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236ea8fe'%3E%3Cpath d='M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
@@ -15,7 +15,7 @@
         <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z"/>
       </svg>
       <span class="brand-name">VoxAI</span>
-      <span class="brand-tag" title="Speech recognition, the language model and the voice all run on this machine">100% local</span>
+      <span class="brand-tag" title="Speech recognition and speech synthesis run locally; Gemini answers through Google's API">Local speech · Gemini AI</span>
     </div>
     <div class="topbar-right">
       <span id="health-chip" class="chip" title="Backend status">checking…</span>
@@ -29,8 +29,8 @@
       <div id="chat-log" class="chat-log" aria-live="polite" aria-relevant="additions text">
         <div id="empty-state" class="empty-state">
           <h2>Talk to VoxAI</h2>
-          <p>Press the microphone (or <strong>Start</strong>) and ask a question.</p>
-          <p>Everything runs on this machine: Faster-Whisper hears you, Qwen3 answers, Piper speaks.</p>
+          <p>Press the microphone (or <strong>Start</strong>), speak, and VoxAI answers automatically once you stop talking — or press <strong>Stop</strong> to send immediately.</p>
+          <p>Faster-Whisper transcribes and Piper speaks locally; Gemini answers securely through the Flask backend.</p>
           <p class="hint">Follow-ups work too — try “What's the capital of France?” and then “And how many people live there?”</p>
         </div>
       </div>
@@ -38,12 +38,6 @@
       <div id="error-banner" class="error-banner" hidden>
         <span id="error-text"></span>
         <button id="error-dismiss" class="icon-btn" type="button" aria-label="Dismiss error">✕</button>
-      </div>
-
-      <div id="latency-panel" class="latency-panel" hidden>
-        <h3>Latency <span class="tag">measured</span></h3>
-        <div id="latency-grid" class="latency-grid"></div>
-        <p id="latency-note" class="latency-note"></p>
       </div>
 
       <div class="composer">
@@ -55,6 +49,7 @@
         <button id="start-btn" class="btn" type="button">Start</button>
         <button id="stop-btn" class="btn" type="button" disabled>Stop</button>
         <span id="record-timer" class="timer" aria-hidden="true">0.0s</span>
+        <span id="vad-hint" class="vad-hint" aria-live="polite"></span>
         <span class="composer-spacer"></span>
         <button id="new-btn" class="btn ghost" type="button" title="Start a fresh conversation">New conversation</button>
         <button id="clear-btn" class="btn ghost" type="button" title="Erase this conversation on the server">Clear history</button>
@@ -101,9 +96,10 @@
   </main>
 
   <footer class="footer">
-    VoxAI v{{ version }} · all inference runs locally · <a href="/api/health">/api/health</a>
+    VoxAI v{{ version }} · speech runs locally; Gemini chat uses Google's API · <a href="/api/health">/api/health</a>
   </footer>
 
+  <script src="/static/js/vad.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>

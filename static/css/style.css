@@ -257,40 +257,6 @@ code {
   margin: 8px 0;
 }
 
-/* ------------------------------------------------------------- latency */
-.latency-panel {
-  border: 1px solid var(--border);
-  background: var(--surface);
-  border-radius: var(--radius);
-  padding: 10px 14px;
-  margin: 8px 0;
-}
-.latency-panel h3 {
-  margin: 0 0 8px;
-  font-size: 0.86rem;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.latency-panel .tag {
-  font-size: 0.68rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 1px 8px;
-  color: var(--muted);
-}
-.latency-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 6px 14px;
-  font-size: 0.82rem;
-}
-.latency-row { display: flex; justify-content: space-between; gap: 8px; }
-.latency-row .label { color: var(--muted); }
-.latency-row .value { font-variant-numeric: tabular-nums; }
-.latency-row .value.na { color: var(--muted); }
-.latency-note { margin: 8px 0 0; font-size: 0.74rem; color: var(--muted); }
-
 /* ------------------------------------------------------------- composer */
 .composer {
   display: flex;
@@ -347,6 +313,14 @@ code {
   font-variant-numeric: tabular-nums;
   color: var(--muted);
   min-width: 56px;
+}
+
+/* Auto-stop / VAD status line under the composer controls. */
+.vad-hint {
+  flex-basis: 100%;
+  min-height: 1.1em;
+  font-size: 0.78rem;
+  color: var(--muted);
 }
 
 .text-form {
@@ -409,3 +383,27 @@ code {
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ---- web search source links ---- */
+.tag-search {
+  background: #1a6b3c;
+  color: #7dffb3;
+  font-size: 0.75rem;
+  padding: 0.15em 0.45em;
+  border-radius: 4px;
+}
+.source-links {
+  margin-top: 0.35em;
+  font-size: 0.8rem;
+  color: #9ca3af;
+  line-height: 1.5;
+}
+.source-link {
+  color: #6ea8fe;
+  text-decoration: none;
+  word-break: break-all;
+}
+.source-link:hover {
+  text-decoration: underline;
+}
+

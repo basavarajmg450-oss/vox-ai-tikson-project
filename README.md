@@ -1,14 +1,14 @@
-# VoxAI — a fully local voice assistant
+# VoxAI — local voice, Gemini-powered answers
 
 Speak a question in the browser → hear the recognized text → get an answer from a
-local LLM → hear it spoken back — all on your own machine. **No hosted APIs, no
-API keys, no network inference.**
+Gemini Flash model → hear it spoken back. **Faster-Whisper and Piper run locally;
+chat prompts are sent from the Flask backend to Google's Gemini API.**
 
 ```
-Browser (MediaRecorder) → Faster-Whisper (STT) → Ollama / Qwen3 (LLM) → Piper (TTS) → Browser audio
+Browser (MediaRecorder) → Faster-Whisper (local STT) → Gemini API (LLM) → Piper (local TTS) → Browser audio
 ```
 
-![status](https://img.shields.io/badge/STT-faster--whisper-blue) ![status](https://img.shields.io/badge/LLM-qwen3%3A4b%20via%20Ollama-blue) ![status](https://img.shields.io/badge/TTS-Piper-blue)
+![status](https://img.shields.io/badge/STT-faster--whisper-blue) ![status](https://img.shields.io/badge/LLM-Gemini%20Flash-blue) ![status](https://img.shields.io/badge/TTS-Piper-blue)
 
 ---
 
@@ -33,25 +33,41 @@ Browser (MediaRecorder) → Faster-Whisper (STT) → Ollama / Qwen3 (LLM) → Pi
 
 ## Features
 
-**Voice pipeline (all local)**
+**Voice pipeline**
 - Record in the browser with `MediaRecorder` (start/stop controls, mic button
   with recording animation, live timer).
 - Transcribe with **faster-whisper** (`base`, CPU `int8`), auto language
   detection — English and Hindi supported; silence / empty / invalid audio
   produce clear errors, not crashes.
-- Answer with **Qwen3-4B through Ollama** with:
+- Answer with **Google Gemini** using the official `google-genai` Python SDK:
+  - **automatic model discovery**: the models available to your API key are
+    queried at runtime (`models.list()`) and the best suitable text-generation
+    model is selected — no manual `GEMINI_MODEL` editing when a model is
+    unavailable,
+  - `GEMINI_MODEL` remains an optional *preferred* model (honoured only when
+    discovery finds it),
   - a voice-assistant system prompt (concise, spoken-style answers),
   - recent-turn history bounded by `MAX_HISTORY_TURNS` (server-side only),
   - answer length bounded by `MAX_RESPONSE_TOKENS`,
   - configurable temperature (settings slider),
-  - **reasoning kept out of the answer**: thinking goes to Ollama's separate
-    `message.thinking` field which VoxAI discards, and any tagged leak is
-    stripped (`strip_thinking`).
-  - clear messages for *Ollama stopped*, *model missing*, *timeout*.
-- Speak the answer with **Piper** (`en_US-lessac-medium`, plus
-  `hi_IN-rohan-medium` used automatically for Hindi) — voice loaded **once**
-  and reused, WAV output, temp files swept by TTL. If TTS fails, the text
+  - API key and model configured only on the Flask backend,
+  - clear messages for missing/invalid credentials, quota, model discovery
+    failures, empty response and timeout.
+- Speak the answer with **Piper** — one fixed, single-speaker voice per
+  language: `en_US-ryan-medium` (English) and `hi_IN-rohan-medium`
+  (Hindi), both **male voices**, so the speaker identity and gender stay
+  consistent across responses and languages. Voices are loaded **once** and
+  reused; WAV output, temp files swept by TTL. Language detection only picks
+  the language model — never a different speaker — and a missing voice fails
+  with a clear error instead of silently switching. If TTS fails, the text
   answer still shows with a visible warning.
+
+**Live web search for current information**
+- Optional, configurable web search using **DuckDuckGo** (no paid hosted AI inference API required).
+- **Intelligent heuristics**: queries regarding current events, latest news, recent releases, weather, prices, or recent dates automatically trigger retrieval; ordinary questions use the local LLM directly without internet overhead.
+- **Grounded answers & source links**: retrieved search snippets and source URLs are passed to the model prompt, and clickable source links are displayed in the chat interface.
+- **Safeguards**: HTML stripping, length truncation, and removal of suspicious prompt injection directives (e.g. `ignore previous instructions`, `system: override`).
+- **Honest error handling**: if search fails or the internet is unreachable, VoxAI tells the user that current web information could not be retrieved and does not falsely claim to have searched the web.
 
 **Sessions**
 - History is authoritative on the Flask backend, keyed by an unguessable
@@ -60,10 +76,10 @@ Browser (MediaRecorder) → Faster-Whisper (STT) → Ollama / Qwen3 (LLM) → Pi
 
 **Interface** (vanilla HTML/CSS/JS, dark theme)
 - VoxAI branding, accessible contrast, subtle animations only.
-- Status pill with real stage transitions: **Ready → Listening → Transcribing →
+- Status pill with real stage transitions: **Ready → Listening → Processing →
   Thinking → Speaking → Error** (fed by genuine SSE stage events, not timers).
 - User/assistant bubbles, transcript + response text, `<audio>` playback
-  controls with optional autoplay, latency panel, settings section,
+  controls with optional autoplay, settings section,
   permission/error messages, health chip.
 
 **Honesty by design**
@@ -72,7 +88,15 @@ Browser (MediaRecorder) → Faster-Whisper (STT) → Ollama / Qwen3 (LLM) → Pi
   `"streaming": false`.
 - Every latency number is measured with `time.perf_counter()` and labelled
   with its source (`measured_server`, `measured_client`,
-  `measured_client_plus_server`). Nothing is estimated.
+  `measured_client_plus_server`). Nothing is estimated. The timings stay in
+  the API response (`latency` object) and in `scripts/benchmark.py` reports
+  for analysis — the chat UI deliberately does not display them.
+- `/api/health` reports whether Gemini configuration is present without making
+  an API request; model availability stays `not_checked` until model discovery
+  has actually run on a real chat request, then reports `available`,
+  `unavailable` or `error` honestly.
+- The Gemini API key is never sent to the browser or included in API responses,
+  logs, health responses or error messages.
 
 ---
 
@@ -91,14 +115,14 @@ Full write-up with the diagram and request lifecycle: **[docs/architecture.md](d
 │  routes/: health · voice · chat · sessions     (validation + errors)   │
 │  services/voice_pipeline.py  orchestrates:                              │
 │    ① STT  faster-whisper (CPU int8, auto language: en/hi)              │
-│    ② LLM  Ollama → qwen3:4b (history bounded, reasoning excluded)      │
+│    ② LLM  Google Gemini API (recent history and output bounded)         │
 │    ③ TTS  Piper → WAV in var/audio/ (loaded once)                      │
 │  services/session_store.py  authoritative, isolated, TTL-bounded       │
 └───────┼────────────────────────────────────────────────────────────────┘
         ▼  JSON (transcript, answer, audio_url, measured metrics)
            +  WAV bytes via GET /api/audio/<filename>
 ┌────────────────────────────  Your browser  ────────────────────────────┐
-│  <audio controls> plays the WAV · bubbles · status · latency panel     │
+│  <audio controls> plays the WAV · bubbles · status · mic controls      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -109,16 +133,15 @@ Full write-up with the diagram and request lifecycle: **[docs/architecture.md](d
 **Software**
 - Windows 11 (commands below are PowerShell; Linux/macOS work with `.venv/bin/…`)
 - Python 3.11+ (3.11-compatible codebase)
-- [Ollama](https://ollama.com/download) with the server running (`ollama serve`)
+- A Google AI Studio API key with access to a Gemini Flash model
 - A modern browser with `MediaRecorder` + `getUserMedia` (Chrome/Edge/Firefox);
   microphone access over `http://localhost` (browsers allow it without HTTPS)
 
 **Hardware (measured on the machine this repo was built on)**
 - CPU: Intel Core 5-class (integrated graphics only — **no CUDA GPU needed**)
-- RAM: 16 GB recommended (Ollama ≈ 3–4 GB with qwen3:4b, Whisper base ≈ 0.5 GB)
-- Disk: ≈ 1.5 GB for models (qwen3:4b ≈ 2.3 GB download, whisper base ≈ 145 MB,
-  two Piper voices ≈ 130 MB)
-- No GPU required; a GPU only makes the LLM stage faster.
+- RAM: 4 GB recommended for local Whisper/Piper models
+- Disk: roughly 300 MB for Whisper base and the two Piper voices; Gemini runs remotely
+- No GPU required for the local speech stages.
 
 ---
 
@@ -131,30 +154,44 @@ python -m venv .venv
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-# 2) Ollama model (once). Then keep the server running in another terminal:
-ollama pull qwen3:4b
-ollama serve            # leave running
+# 2) Create .env only if it does not already exist, then edit it.
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
+#    Create a key at https://aistudio.google.com/app/apikey and set
+#    GEMINI_API_KEY in .env (never put it in frontend code).
 
 # 3) Whisper + Piper assets (once) — downloads into ./models
 python scripts/prefetch_assets.py
 
-# 4) Optional configuration
-copy .env.example .env
-
-# 5) Run the app
+# 4) Run the app
 python app.py
 #    → open http://localhost:5000
 
-# 6) Run the tests
+# 5) Run the tests
 python -m pytest -m "not integration" -q                 # unit tests (mocked AI)
-$env:VOXAI_INTEGRATION=1; python -m pytest -m integration -v   # real models
+$env:VOXAI_INTEGRATION=1; python -m pytest -m integration -v   # Gemini + local Whisper/Piper
 ```
 
 Without activating the venv, use `.\.venv\Scripts\python.exe` in place of `python`.
+Start from the project directory. `.env` is ignored by Git; do not commit the API
+key. For local development, the exact start command after setup is
+`.\.venv\Scripts\python.exe app.py`, then open `http://localhost:5000`.
 
-**First request is slow on purpose:** models load lazily (first transcription ≈ 4 s,
-first TTS ≈ 6 s, first chat ≈ 30 s). Warm-up threads preload them at startup, and
-`/api/health` reports the load state.
+Whisper and Piper load lazily (and are warmed in background threads when started
+with `python app.py`). Gemini latency depends on the network, model, and API
+quota; measure it through the API's `latency` payload or `scripts/benchmark.py`
+rather than assuming a speed improvement.
+
+### Getting and configuring a Gemini API key
+
+1. Sign in to [Google AI Studio](https://aistudio.google.com/app/apikey) and
+   create an API key for a project that has Gemini API access.
+2. Copy `.env.example` to `.env` if one does not exist, then set
+   `GEMINI_API_KEY`. Set `GEMINI_MODEL` only if you want to pin a specific
+   model — otherwise VoxAI discovers the best model your key can use
+   automatically (see [Automatic Gemini model discovery](#automatic-gemini-model-discovery)).
+3. Keep `.env` private. The browser only calls Flask endpoints; the key is read
+   by the server and is never returned by `/api/health`.
 
 ---
 
@@ -165,13 +202,16 @@ All settings are environment variables (`.env` is loaded automatically). See
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OLLAMA_MODEL` | `qwen3:4b` | Chat model (verified present before serving) |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server |
-| `OLLAMA_TIMEOUT_S` | `180` | Model timeout → clear 504 message |
+| `GEMINI_API_KEY` | *(empty)* | Google AI Studio key; required for chat, kept server-side |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | *Optional preferred* Gemini model; used only when discovery finds it — leave empty to always auto-select |
+| `GEMINI_MODEL_ATTEMPTS` | `3` | Bounded retries: rejected models and transient overload answers each try at most this many candidates (1–10) |
+| `GEMINI_TIMEOUT_S` | `60` | One-request timeout → clear 504 message |
 | `WHISPER_MODEL` | `base` | STT size: tiny/base/small/medium/large-v3 |
 | `WHISPER_DEVICE` / `WHISPER_COMPUTE_TYPE` | `cpu` / `int8` | Inference device |
-| `PIPER_MODEL_PATH` | `./models/voices/en_US-lessac-medium.onnx` | English voice |
-| `PIPER_MODEL_PATH_HI` | `./models/voices/hi_IN-rohan-medium.onnx` | Hindi voice |
+| `PIPER_MODEL_PATH` | `./models/voices/en_US-ryan-medium.onnx` | English voice (male) |
+| `PIPER_MODEL_PATH_HI` | `./models/voices/hi_IN-rohan-medium.onnx` | Hindi voice (male, same gender as the English voice) |
+| `WHISPER_BEAM_SIZE` | `1` | STT decoding width: 1 = greedy (~2× faster on CPU), 2–10 = beam search |
+| `GEMINI_THINKING_BUDGET` | `0` | Hidden reasoning tokens: 0 = off (fast short answers), -1 = provider default |
 | `MAX_HISTORY_TURNS` | `8` | Recent turns sent to the model |
 | `MAX_RESPONSE_TOKENS` | `200` | Bound on the visible answer |
 | `LLM_TEMPERATURE` | `0.6` | Sampling temperature |
@@ -179,6 +219,63 @@ All settings are environment variables (`.env` is loaded automatically). See
 | `MAX_AUDIO_BYTES` | `15728640` | Upload limit (413 above it) |
 | `AUDIO_DIR` | `./var/audio` | Generated WAVs (served only from here) |
 | `STRICT_STARTUP` | `0` | `1` = abort boot if a model file is missing |
+| `WEB_SEARCH_ENABLED` | `1` | `1` = enable live web search for questions needing current info; `0` = disable |
+| `WEB_SEARCH_PROVIDER` | `duckduckgo` | Free search provider (no API key required) |
+| `WEB_SEARCH_TIMEOUT_S` | `8.0` | Search request timeout in seconds |
+| `WEB_SEARCH_MAX_RESULTS` | `3` | Maximum snippets passed to the LLM context (1–10) |
+
+### Web search for current information
+
+Web search integration lives in `services/web_search.py` and is fully configurable:
+
+- **Heuristic query classification**: VoxAI inspects incoming queries using keyword patterns (`latest`, `current`, `news`, `today`, `weather`, `who won`, `2026`, etc., in English and Hindi). Ordinary offline questions (math, code explanation, storytelling, definitions) bypass web search completely and are answered directly by the local LLM.
+- **Provider**: DuckDuckGo HTML endpoint with automatic library fallback. No paid AI search API or credit card is required.
+- **Prompt injection safeguards**: search snippets are sanitised to remove HTML tags, bounded in length (max 400 characters per snippet), and scrubbed of prompt-injection attempts (such as `ignore previous instructions` or `system:` overrides).
+- **Grounded context & source citations**: retrieved facts and URLs are injected into the LLM system prompt. The LLM produces a concise, conversational answer, and clickable source links are displayed in the chat interface.
+- **Graceful degradation**: if the search service or internet connection fails, VoxAI clearly and honestly tells the user that current web information could not be retrieved. It never falsely claims to have searched the web.
+
+### Automatic Gemini model discovery
+
+Model selection lives in `services/llm_service.py` and runs on the backend
+only:
+
+1. **Discover** — the first chat request calls `client.models.list()` once
+   through the single configured `genai.Client` to see which models your
+   `GEMINI_API_KEY` can actually use. Nothing about accessibility is assumed:
+   `gemini-2.5-flash` is only *preferred*, never required.
+2. **Filter** — only models advertising `generateContent` are eligible.
+   Embedding-, image-, video- and audio-only models are excluded, and so are
+   preview/experimental/deprecated models when reliable metadata says so.
+3. **Select** — the configured `GEMINI_MODEL` wins when it is discovered and
+   supports text generation; otherwise the best stable model is chosen
+   automatically (stable Gemini Flash first — good for low-latency
+   conversation — alternating full Flash with Flash-Lite so a demand spike or
+   per-model limit on one family cannot block the other, then other Gemini
+   models, newest first).
+4. **Cache** — the ordered candidates and the selected model are cached, so
+   `models.list()` is *not* repeated for every message; a lock prevents
+   concurrent requests from racing the discovery/switch.
+5. **Fall back** — if a real generation request fails with model-not-found /
+   unsupported-model, that model is remembered as gone for the process, the
+   cache is invalidated (the next message re-discovers without it) and the
+   next suitable candidate is tried. Transient overload answers (HTTP 5xx,
+   “high demand”) also advance to the next candidate but keep the cache —
+   neither ever switches providers. Model rejections (unavailable *or
+   quota-limited* candidates) and overload rejections are each bounded by
+   `GEMINI_MODEL_ATTEMPTS` (default 3) with `GEMINI_TIMEOUT_S` timeouts;
+   retries are never endless. Authentication errors stop immediately. A 429
+   on one candidate — e.g. a per-model free-tier limit such as “20
+   requests/day on gemini-3.8-flash” — is skipped within the same bounded
+   budget so a model with remaining quota can still answer; when quota is
+   what actually blocks the reply, the request fails with an accurate
+   `gemini_quota_exceeded` (429) — never disguised as “model unavailable”.
+
+**To override**, set `GEMINI_MODEL` in `.env` to any model your key can use
+(for example a specific Flash or a preview model you explicitly want) and
+restart Flask; leave it empty for pure automatic selection. `/api/health`
+reports the result as `gemini.discovery` (`not_attempted` / `ok` /
+`failed`), `gemini.availability` (`not_checked` / `available` /
+`unavailable` / `error`) and `gemini.selected_model`.
 
 ---
 
@@ -186,7 +283,7 @@ All settings are environment variables (`.env` is loaded automatically). See
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/health` | Server + dependency status (Ollama reachable, model present, Whisper/Piper loaded) |
+| `GET` | `/api/health` | Server + dependency status (Gemini configured + discovery/selection status; Whisper/Piper status); no Gemini API request |
 | `POST` | `/api/transcribe` | Audio → transcript + detected language |
 | `POST` | `/api/chat` | Text → LLM answer (history kept server-side) |
 | `POST` | `/api/voice` | Full pipeline → transcript, answer, `audio_url`, metrics (optional `stream=progress` SSE) |
@@ -198,7 +295,11 @@ All settings are environment variables (`.env` is loaded automatically). See
 
 Validation: upload size (413), audio MIME allow-list (415), empty/missing body (400),
 bad parameters (400 with `code` + `hint`), silence (422 `no_speech`), missing
-model (503), Ollama down (503), timeout (504). Path traversal on `/api/audio`
+Gemini credentials (503), invalid credentials (502), quota/rate limit (429),
+model discovery found no usable model (503 `gemini_no_model_available`),
+discovered models rejected by the API (503 `gemini_model_unavailable`),
+model discovery failure (502 `gemini_discovery_failed`), timeout (504). Path
+traversal on `/api/audio`
 returns 404 (allow-list regex + resolved-path containment check).
 
 Example:
@@ -215,26 +316,33 @@ curl -X POST -H "Content-Type: application/json" `
 
 ```powershell
 # Unit tests (mocked AI services — no models needed):
-.\.venv\Scripts\python.exe -m pytest -m "not integration" -q
-#   54 passed, 6 deselected in 0.62s
+python -m pytest -m "not integration" -q
+#   163 passed, 11 deselected
 
-# Integration tests (real Ollama + Whisper + Piper; requires `ollama serve`
-# and downloaded assets):
-$env:VOXAI_INTEGRATION=1; .venv\Scripts\python.exe -m pytest -m integration -v
-#   6 passed, 54 deselected in 209.42s
+# Integration tests (real Gemini + Whisper + Piper; requires .env and assets):
+$env:VOXAI_INTEGRATION=1; python -m pytest -m integration -v
+#   11 passed — needs the real key and downloaded local assets (last verified run).
 ```
 
-*(Results from runs on this machine — re-run to reproduce; timings vary.)*
+Re-run the unit command after changes. Integration tests contact the configured
+Gemini API and require downloaded Whisper/Piper assets.
 
 Unit suite covers: health/dependency reporting and degradation, session
 creation/isolation/bounded history/clearing, forged-history rejection, the full
 voice pipeline (metrics, TTS-failure fallback, silence handling), SSE stage
-events, request validation (400/413/415/422), and audio path-traversal attempts.
+events, request validation (400/413/415/422), audio path-traversal attempts,
+Gemini model discovery, and **web search capabilities** (keyword heuristic
+classification, prompt-injection sanitisation, HTML tag stripping, context
+formatting, search failure handling, clickable source links, and ordinary offline
+question bypass).
 
 Integration suite (`-m integration`) runs against the **real** services:
-health ready, real LLM answer, **multi-turn memory recall**, Piper WAV validity
-(readable RIFF), Whisper round-trip on Piper audio, and the full
-`/api/voice` end-to-end.
+health ready, **real model discovery** (`models.list()` against your key), real
+LLM answer, **multi-turn memory recall**, Piper WAV validity
+(readable RIFF), Whisper round-trip on Piper audio, the full
+`/api/voice` end-to-end, and **voice-consistency checks** (the same configured
+voice for every English response, for every Hindi response, and across
+alternating English/Hindi turns).
 
 Benchmark (measured latencies) is reproducible with:
 
@@ -247,28 +355,12 @@ Benchmark (measured latencies) is reproducible with:
 
 ## Measured latency
 
-From `scripts/benchmark.py --turns 3` on this machine (CPU-only, 3 measured
-turns per stage; full output in [docs/benchmark-results.md](docs/benchmark-results.md)):
-
-| Stage | Measured |
-|---|---|
-| Health check | 2 104 ms (Ollama ping; cached for 3 s in-app) |
-| TTS first call (incl. model load) | 5 562 ms |
-| **TTS synthesis** | min 173 / **median 174** / max 183 ms |
-| STT first call (incl. model load) | 4 124 ms |
-| **STT transcription (~3 s clip)** | min 1 433 / **median 1 519** / max 1 563 ms |
-| LLM first call (incl. model load) | 31 540 ms |
-| **LLM chat round-trip** | min 35 332 / **median 38 670** / max 55 790 ms |
-| **Full `/api/voice` wall-clock** | min 31 273 / **median 31 832** / max 34 946 ms |
-
-Notes:
-- All values are `time.perf_counter()` measurements — recording time excluded,
-  nothing estimated.
-- The LLM dominates: Qwen3-4B reasons before answering (its thinking goes to a
-  discarded field), and `num_predict` includes a reasoning headroom
-  (`MAX_RESPONSE_TOKENS + 1024`) so the answer is never starved to empty.
-  A smaller model (`qwen3:1.7b`) or a GPU cuts this dramatically.
-- Pipeline is buffered — `streaming: false` is reported in every response.
+No Gemini latency benchmark has been run for this integration, so no speedup is
+claimed. Run `.\.venv\Scripts\python.exe scripts\benchmark.py --turns 3` with
+the API key and local speech assets configured to measure actual Gemini,
+Whisper, Piper, and end-to-end timings. Existing
+[benchmark results](docs/benchmark-results.md) are from the previous Ollama
+implementation and are historical only, not representative of Gemini.
 
 ---
 
@@ -300,10 +392,10 @@ nothing about the first (`tests/test_sessions.py::test_sessions_are_strictly_iso
 
 ## Demo recording checklist (2–3 min)
 
-Use this script when recording the assignment demo:
+Use this script when recording a demo:
 
-1. **0:00–0:15** — Show `models/`, `ollama list` (qwen3:4b), `/api/health`
-   JSON: `status: ok`, `ollama.reachable: true`, `whisper.loaded: true`.
+1. **0:00–0:15** — Show the local Whisper/Piper assets and `/api/health`
+   JSON: `status: ok`, `gemini.configured: true`, `whisper.loaded: true`.
 2. **0:15–0:30** — Open `http://localhost:5000`. Point at the dark VoxAI UI:
    status pill “Ready”, health chip “backend online”.
 3. **0:30–0:55** — Press **Start** (mic permission dialog if first time), say
@@ -311,18 +403,16 @@ Use this script when recording the assignment demo:
    Listening → Transcribing → Thinking → Speaking, the recognized transcript
    bubble, the answer bubble, and audio playing.
 4. **0:55–1:25** — Ask the follow-up *“And how many people live there?”* —
-   answer must reference Paris (memory demo). Show the latency panel rows
-   (measured labels).
+   answer must reference Paris (memory demo).
 5. **1:25–1:45** — Ask a Hindi question (e.g. *“भारत की राजधानी क्या है?”*) —
-   transcript language tag `hi`, Hindi voice plays.
+   transcript language tag `hi` — the same female voice continues in Hindi.
 6. **1:45–2:05** — Settings panel: lower *Max answer length*, ask again →
    shorter reply. Toggle autoplay off → audio only on click.
 7. **2:05–2:25** — **New conversation**, ask the same question again → it no
    longer remembers “Trikon”/Paris context (server history reset). **Clear
    history** → notice banner.
-8. **2:25–2:45** — Error paths: deny mic permission → clear message; stop
-   Ollama → health chip goes red with “start ollama serve” hint; restart it →
-   recovers.
+8. **2:25–2:45** — Error paths: deny mic permission → clear message; remove
+   the backend API key → health reports Gemini as not configured.
 9. **2:45–3:00** — Run `pytest -m "not integration"` on camera (all green).
 
 ---
@@ -331,15 +421,14 @@ Use this script when recording the assignment demo:
 
 | Component | Model / voice | License | Download |
 |---|---|---|---|
-| LLM | `qwen3:4b` (Ollama) | Apache 2.0 | `ollama pull qwen3:4b` |
+| LLM | Gemini Flash (configured by `GEMINI_MODEL`) | Google Gemini API terms | [Google AI Studio](https://aistudio.google.com/) |
 | STT | `Systran/faster-whisper-base` (CTranslate2) | MIT (conversion of `openai/whisper-base`) | auto via `scripts/prefetch_assets.py` or first request |
-| TTS (en) | Piper `en_US-lessac-medium` | Blizzard 2013 Lessac dataset license (see voice card) | `scripts/prefetch_assets.py` |
-| TTS (hi) | Piper `hi_IN-rohan-medium` | IndicTTS license (see voice card) | `scripts/prefetch_assets.py` |
+| TTS (en) | Piper `en_US-ryan-medium` (male) | see voice card | `scripts/prefetch_assets.py` |
+| TTS (hi) | Piper `hi_IN-rohan-medium` (male, matches the English voice) | see voice card | `scripts/prefetch_assets.py` |
 
-Sources: [Ollama qwen3:4b](https://ollama.com/library/qwen3:4b),
-[Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B),
+Sources: [Google AI Studio](https://aistudio.google.com/),
 [faster-whisper-base](https://huggingface.co/Systran/faster-whisper-base),
-[lessac voice card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/lessac/medium/MODEL_CARD),
+[ryan voice card](https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/ryan/medium/MODEL_CARD),
 [rohan voice card](https://huggingface.co/rhasspy/piper-voices/blob/main/hi/hi_IN/rohan/medium/MODEL_CARD),
 [piper-voices repo](https://huggingface.co/rhasspy/piper-voices).
 
@@ -352,7 +441,7 @@ Manual alternative to the prefetch script:
 # Whisper
 python -c "from faster_whisper.utils import download_model; download_model('base', local_dir='./models/whisper/base')"
 # Piper voices (examples used by this repo)
-# models/voices/en_US-lessac-medium.onnx(+.json) and hi_IN-rohan-medium.onnx(+.json)
+# models/voices/en_US-ryan-medium.onnx(+.json) and hi_IN-rohan-medium.onnx(+.json)
 # from https://huggingface.co/rhasspy/piper-voices
 ```
 
@@ -362,15 +451,17 @@ python -c "from faster_whisper.utils import download_model; download_model('base
 
 | Symptom | Fix |
 |---|---|
-| Health chip “backend unreachable” | Start Ollama: `ollama serve`. Flask and Ollama must run at the same time. |
-| `/api/health` shows `model_missing` | `ollama pull qwen3:4b` |
+| Health shows Gemini not configured | Set `GEMINI_API_KEY` in the project `.env` and restart Flask. |
+| Gemini authentication error (401/403) | Create/check the key in [Google AI Studio](https://aistudio.google.com/app/apikey); confirm Gemini API access for its project. Replace revoked/invalid keys and do not paste them into frontend code. |
+| Gemini quota/rate-limit error (429) | VoxAI skips a quota-limited model within its bounded retries and keeps answering via other models; it reports 429 only when every tried model is quota-blocked — then check usage and quota reset times in Google AI Studio, or pin a model with remaining quota via `GEMINI_MODEL`. |
+| Gemini temporarily overloaded (503 `gemini_overloaded`) | Transient Google-side demand spike. VoxAI already tried the next discovered models within `GEMINI_MODEL_ATTEMPTS`; wait a few seconds and send the message again. |
+| Gemini model discovery finds no usable model (503) | VoxAI picks a model automatically; if discovery finds none, check that the key's project has Gemini API access and no restrictive key limitations in [Google AI Studio](https://aistudio.google.com/app/apikey), or set `GEMINI_MODEL` to a model the key can use and restart Flask. |
 | “Microphone permission denied” | Allow the mic via the padlock icon in the address bar, then press Start again. |
-| First answer takes ~30–60 s | Normal on CPU: model load + reasoning. Check the latency panel; try `qwen3:1.7b` for speed. |
-| 504 “model did not answer” | Raise `OLLAMA_TIMEOUT_S`, lower `MAX_RESPONSE_TOKENS`, or use a smaller model. |
-| 503 “Ollama is not reachable” | Same as unreachable chip — `ollama serve`. |
+| Gemini request times out (504) | Check network connectivity; increase `GEMINI_TIMEOUT_S` or reduce `MAX_RESPONSE_TOKENS`. |
+| Gemini answers are slow | Check the API's measured `latency` payload (or `scripts/benchmark.py`), network, selected model, and Google AI Studio status; no specific speedup is guaranteed. |
 | 422 `no_speech` | You recorded silence; speak closer to the mic for ~2 s. |
 | 415 / 413 on upload | Unsupported type or clip too long; record shorter audio (limit `MAX_AUDIO_BYTES`). |
-| No answer audio | TTS failed — the bubble shows a warning with the reason; check `PIPER_MODEL_PATH` and re-run `scripts/prefetch_assets.py`. |
+| No answer audio | TTS failed — the bubble shows a warning with the reason; check `PIPER_MODEL_PATH` / `PIPER_MODEL_PATH_HI` and re-run `scripts/prefetch_assets.py` (a missing Hindi voice raises `tts_hindi_voice_missing` instead of switching voices). |
 | Windows activation blocked | `Set-ExecutionPolicy -Scope Process RemoteSigned` then re-activate, or skip activation and use `.\.venv\Scripts\python.exe …` directly. |
 | Port already in use | Another process owns :5000 — stop it or change `PORT` in `.env`. |
 | Whisper/Piper files missing | Startup lists the exact missing path and the command to fetch it (also in `/api/health` → `startup_issues`). |
@@ -379,19 +470,17 @@ python -c "from faster_whisper.utils import download_model; download_model('base
 
 ## Known limitations
 
-1. **Latency is CPU-bound** — median full-pipeline ≈ 32 s and chat ≈ 39 s on
-   this machine (measured; see above). Qwen3-4B reasons before answering and
-   the thinking tokens count against `num_predict`, hence the headroom that
-   makes answers reliable but slower. Mitigations: `qwen3:1.7b`, a GPU build of
-   Ollama, or a faster machine.
+1. **Gemini requires network and API quota** — chat text and recent turns are
+   sent from Flask to Google; response time depends on network conditions,
+   model availability, and quota. Only STT and TTS remain local.
 2. **Buffered, not streaming** — nothing is played until the whole recording
    is transcribed, answered and synthesised (stated in the UI and API; the SSE
    progress events only report *real* stage transitions).
 3. **In-memory sessions** — history lives in the Flask process; restarting the
    server clears it (TTL `SESSION_TTL_SECONDS` also applies). A persistent
    store (SQLite) is the natural next step.
-4. **Reasoning is discarded, not zero-cost** — Qwen3's thinking still consumes
-   time/tokens; VoxAI only guarantees it never reaches the user.
+4. **The API key must be protected** — keep it in the ignored backend `.env`;
+   rotate it if it is exposed.
 5. **Hindi quality depends on the `base` Whisper size** — auto-detection works,
    but `small`/`medium` improve accented speech (`WHISPER_MODEL=small`).
 6. **Single-process dev server** — Flask `threaded=True` is fine locally; use
@@ -408,10 +497,10 @@ python -c "from faster_whisper.utils import download_model; download_model('base
 - **WebRTC input**: client-side noise suppression + VAD so only speech is sent.
 - **Persistent, multi-device sessions** in SQLite with per-session titles.
 - **Tool use**: local calendar/notes tools behind the same session state.
-- **Smaller/faster models** selectable from the settings panel
-  (`qwen3:1.7b`, `qwen3:4b-instruct` variants) with per-model latency stats.
+- **Gemini model selection** in the settings panel with measured per-model
+  latency stats.
 - **GPU acceleration** config passthrough (`WHISPER_DEVICE=cuda`,
-  Ollama on CUDA) with automatic capability detection.
+  faster-whisper CUDA support) with automatic capability detection.
 - **Streaming STT feedback**: live interim transcript while recording (browser
   speech API as an optional aid, local Whisper remains authoritative).
 - **Speaker diarisation & wake word** (“Hey VoxAI”) running fully locally.

@@ -1,14 +1,13 @@
 """``GET /api/health`` - server and dependency status.
 
 Always answers ``200`` when the Flask process itself is alive (liveness plus a
-detailed dependency report); the JSON body's ``status`` field says whether the
-AI dependencies are ready.  Ollama is pinged at most once every few seconds so
-the endpoint stays cheap for polling frontends.
+detailed dependency report). Gemini configuration is reported without making
+any API request; model discovery runs on the first chat request, so until a
+model has actually been verified ``availability`` stays ``not_checked``.
 """
 
 from __future__ import annotations
 
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -18,33 +17,6 @@ from routes._common import config, ctx, services
 
 health_bp = Blueprint("health", __name__)
 
-#: Cache window for the (relatively slow) Ollama ping.
-_OLLAMA_CACHE_SECONDS = 3.0
-_ollama_cache = {"at": 0.0, "payload": None, "owner": None}
-_ollama_lock = threading.Lock()
-
-
-def _cached_ollama_status():
-    now = time.time()
-    # Keep a strong reference to the owning LLM service: a fresh app (tests)
-    # gets a fresh cache, and the referenced object cannot be garbage-collected
-    # and have its id() reused while cached.
-    owner = services().llm
-    with _ollama_lock:
-        cached = _ollama_cache["payload"]
-        if (
-            cached is not None
-            and _ollama_cache["owner"] == owner
-            and now - _ollama_cache["at"] < _OLLAMA_CACHE_SECONDS
-        ):
-            return dict(cached), False
-        payload = services().llm.status()
-        _ollama_cache["payload"] = payload
-        _ollama_cache["at"] = time.time()
-        _ollama_cache["owner"] = owner
-        return dict(payload), True
-
-
 @health_bp.get("/api/health")
 def health():
     started = time.perf_counter()
@@ -52,14 +24,17 @@ def health():
     svc = services()
     context = ctx()
 
-    ollama_status, _fresh = _cached_ollama_status()
+    gemini_status = svc.llm.status()
     whisper_status = svc.stt.status()
     piper_status = svc.tts.status()
 
     problems = [issue for issue in context.issues if issue["level"] == "error"]
-    if not ollama_status["reachable"]:
+    gemini_availability = gemini_status.get("availability")
+    if not gemini_status["configured"]:
         status = "degraded"
-    elif not ollama_status["model_present"]:
+    elif gemini_availability in {"error", "unavailable"}:
+        # Discovery ran and verified a problem (auth, quota, network, or no
+        # usable model) - report it instead of claiming everything is fine.
         status = "degraded"
     elif problems:
         status = "degraded"
@@ -72,9 +47,10 @@ def health():
         "version": context.version,
         "server_time": datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": round(time.time() - context.started_at, 1),
-        "ollama": ollama_status,
+        "gemini": gemini_status,
         "whisper": whisper_status,
         "piper": piper_status,
+        "web_search": svc.web_search.status() if svc.web_search else {"enabled": False},
         "sessions": svc.sessions.stats(),
         "config": cfg.public(),
         "startup_issues": context.issues,
